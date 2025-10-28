@@ -1,0 +1,4 @@
+Build instructions:
+  source /opt/ros/<distro>/setup.bash
+  cd ros2_ws
+  colcon build --symlink-install
