@@ -16,5 +16,5 @@ setup(
     description='Auto-generated ROS2 package from localplanner.zip',
     license='Apache-2.0',
     tests_require=['pytest'],
-    entry_points={'console_scripts': ['frenet_planner_node = frenet_optimal_trajectory.frenet_planner_node:main']},
+    entry_points={'console_scripts': ['local_planner = frenet_optimal_trajectory.local_planner:main']},
 )
