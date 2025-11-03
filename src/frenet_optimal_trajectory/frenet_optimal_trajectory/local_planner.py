@@ -406,7 +406,7 @@ class LocalPlanner(Node):
         default_path =self.generate_ref_spline_path()
         if not default_path:
             self.get_logger().warn("[Planner] default_path is empty; skip this cycle.")
-        return
+            return
     
         static_cond = bool(self.flag_static)
         dynamic_cond = bool(self.flag_dynamic)
