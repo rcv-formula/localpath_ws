@@ -17,7 +17,7 @@ class LocalPlanner(Node):
         super().__init__("frenet_dwa_planner")
         qos = QoSProfile(
             depth=1,
-            reliability=ReliliabilityPolicy.RELIABLE,
+            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST
         )
 
