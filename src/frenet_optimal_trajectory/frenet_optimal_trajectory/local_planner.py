@@ -295,19 +295,17 @@ class LocalPlanner(Node):
         left_target  = d_obs - 0.4
         right_target = d_obs + 0.4
 
-        can_go_right = right_target < d_max
-        can_go_left  = abs(left_target)  > abs(d_min)
-
-        if abs(left_target) < abs(d_min):
+        if left_target < d_min:
             left_target = d_min
-
+            can_go_left = False
         if right_target > d_max:
             right_target = d_max
+            can_go_right = False
 
-        if can_go_right and (right_distance > left_distance):
+        if can_go_right and (right_distance >= left_distance):
             side = -1.0
             d_target = right_target
-        elif can_go_left:
+        elif can_go_left and (left_distance >= right_distance):
             side = +1.0
             d_target = left_target
         else:
