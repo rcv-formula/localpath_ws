@@ -79,13 +79,13 @@ class LocalPlanner(Node):
         self.DEBUG_PATH_LOG = True
         self._JUMP_THRESH = 2.0
 
-        self._viz_skip = 0
-        self._viz_stride = 3  
-
         self._gp_cache_ready = False
 
         self._active_idx_list = []
         self._active_idx_set  = set()
+
+        self.can_go_left = False
+        self.can_go_right = False
 
         self.create_timer(1.0 / plan_hz, self.planner)
 
@@ -145,8 +145,7 @@ class LocalPlanner(Node):
         self.priority = int(msg.point.z)
 
     def wall_safe(self, idx,
-                  safety_margin: float = 0.3,
-                  min_width: float = 0.40,
+                  safety_margin: float = 0.2,
                   dir_sign: float = +1.0):
         r, l = self.converter.get_wall_distance(idx)  # (right, left)
         r, l = float(r), float(l)
@@ -158,15 +157,14 @@ class LocalPlanner(Node):
         dmin = -l + safety_margin
         dmax = r - safety_margin
 
-        if dmax - dmin < min_width:
-            mid = 0.5 * (dmin + dmax)
-            half = 0.5 * min_width
-            dmin, dmax = mid - half, mid + half
+        # if dmax - dmin < min_width:
+        #     mid = 0.5 * (dmin + dmax)
+        #     half = 0.5 * min_width
+        #     dmin, dmax = mid - half, mid + half
 
         return dmin, dmax, r, l
 
     def safe_path(self, path, idx_list):
-        
         if not path:
             return []
         frenet_path = self.converter.global_to_frenet(path)  # Nx3 [s,d,v]
@@ -281,9 +279,8 @@ class LocalPlanner(Node):
             return None
 
         if obs_gidx not in self._active_idx_set:
+            self.get_logger().warn("no need to avoid: obs outside active path.")
             return None
-
-        dir_sign = self._heading_dir_sign()
 
         s_obs, d_obs = float(stat_s), float(stat_d)
         x_obs, y_obs = self.converter.frenet_to_global_point(s_obs, d_obs)
@@ -292,23 +289,23 @@ class LocalPlanner(Node):
 
         d_min, d_max, right_distance, left_distance = self.wall_safe(obs_gidx)
 
-        left_target  = d_obs - 0.4
-        right_target = d_obs + 0.4
+        left_target  = d_obs - margin
+        right_target = d_obs + margin
 
         if left_target < d_min:
             left_target = d_min
-            can_go_left = False
+
         if right_target > d_max:
             right_target = d_max
-            can_go_right = False
 
-        if can_go_right and (right_distance >= left_distance):
+        if right_distance > left_distance:
             side = -1.0
             d_target = right_target
-        elif can_go_left and (left_distance >= right_distance):
+        elif left_distance > right_distance:
             side = +1.0
             d_target = left_target
         else:
+            self.get_logger().warn("No safe side to avoid static obstacle.")
             return None
 
         s_points = np.asarray(frenet_path[:, 0], dtype=float)
@@ -326,6 +323,10 @@ class LocalPlanner(Node):
             x, y = self.converter.frenet_to_global_point(s, d)
             v_ref = self.converter.get_velocity_at_s(s)
             static_path.append([x, y, v_ref])
+
+        if len(static_path) == 0:
+            self.get_logger().warn("static_path is empty after avoidance.")
+            return None
 
         return static_path
 
@@ -358,6 +359,7 @@ class LocalPlanner(Node):
         if static_cond:
             if static_p:
                 selected_path, path_type, self.mode = static_p, 1, 1
+                self.get_logger().info("[Planner] Static avoidance path selected.")
             else:
                 selected_path, path_type, self.mode = default_path, 0, 0
         elif dynamic_cond and (self.priority == 1 or not static_cond):
@@ -365,10 +367,9 @@ class LocalPlanner(Node):
         else:
             selected_path, path_type, self.mode = default_path, 0, 0
 
-        self._viz_skip = (self._viz_skip + 1) % self._viz_stride
-        if self._viz_skip == 0:
-            selected_xy = [(p[0], p[1]) for p in (selected_path or [])]
-            self.publish_path_colored(selected_xy, (0.0, 1.0, 0.0, 0.5), "active_path")
+
+        selected_xy = [(p[0], p[1]) for p in (selected_path or [])]
+        self.publish_path_colored(selected_xy, (0.0, 1.0, 0.0, 0.5), "active_path")
 
         if selected_path:
             msg = Path()
