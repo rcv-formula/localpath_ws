@@ -15,15 +15,11 @@ from quintic_polynomials_planner.quintic_polynomials_planner import QuinticPolyn
 class LocalPlanner(Node):
     def __init__(self):
         super().__init__("frenet_dwa_planner")
-
-        # ===== QoS =====
-        # A,B: 퍼블리셔 BEST_EFFORT로 지연 방지
-        self.qos_sub = QoSProfile(depth=1,
-                                  reliability=ReliabilityPolicy.RELIABLE,
-                                  history=HistoryPolicy.KEEP_LAST)
-        self.qos_pub_fast = QoSProfile(depth=1,
-                                       reliability=ReliabilityPolicy.BEST_EFFORT,
-                                       history=HistoryPolicy.KEEP_LAST)
+        qos = QoSProfile(
+            depth=1,
+            reliability=ReliliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST
+        )
 
         # ===== Parameters =====
         self.frame_id = str(self.declare_parameter("frame_id", "map").value)
@@ -36,7 +32,7 @@ class LocalPlanner(Node):
         # Frenet target d samples (dynamic behavior 사용)
         self.FOT_D_SAMPLES = np.linspace(-0.2, 0.4, 5)
 
-        # 비용 가중치 (미사용 항목 있어도 그대로 둠)
+        # 비용 가중치
         self.W_SAFETY = 100.0
         self.W_LATERAL = 1.0
         self.W_JERK_D = 0.5
@@ -51,13 +47,13 @@ class LocalPlanner(Node):
 
         # ===== I/O =====
         self.converter = coordinate_converter(self)
-        self.sub_odom = self.create_subscription(Odometry, "/odom", self.cb_odom, self.qos_sub)
-        self.sub_static = self.create_subscription(PointStamped, "/static_obstacle", self.cb_static, self.qos_sub)
-        self.sub_dynamic = self.create_subscription(Odometry, "/dynamic_obstacle", self.cb_dynamic, self.qos_sub)
-        self.sub_flag = self.create_subscription(PointStamped, "/obj_flag", self.cb_flag, self.qos_sub)
+        self.sub_odom    = self.create_subscription(Odometry, "/odom", self.cb_odom, qos)
+        self.sub_static  = self.create_subscription(PointStamped, "/static_obstacle", self.cb_static, qos)
+        self.sub_dynamic = self.create_subscription(Odometry, "/dynamic_obstacle", self.cb_dynamic, qos)
+        self.sub_flag    = self.create_subscription(PointStamped, "/obj_flag", self.cb_flag, qos)
 
-        self.pub_path = self.create_publisher(Path, "/Path", self.qos_pub_fast)
-        self.marker_pub = self.create_publisher(Marker, "/local_path", self.qos_pub_fast)
+        self.pub_path   = self.create_publisher(Path, "/Path", 1)
+        self.marker_pub = self.create_publisher(Marker, "/local_path", 1)
 
         # ===== State =====
         self.odom = None
@@ -83,22 +79,13 @@ class LocalPlanner(Node):
         self.DEBUG_PATH_LOG = True
         self._JUMP_THRESH = 2.0
 
-        # B: Marker stride(덜 자주 그림)
         self._viz_skip = 0
-        self._viz_stride = 3
+        self._viz_stride = 3  
 
-        # C: 글로벌 경로/프레넷 캐시 플래그
         self._gp_cache_ready = False
 
-        # D: 재계획 트리거용 상태
-        self._last_plan_stamp = self.get_clock().now()
-        self._last_ego_s = None
-        self._last_flags = (0, 0, 0)
-
-        # __init__ 끝부분 근처
         self._active_idx_list = []
         self._active_idx_set  = set()
-
 
         self.create_timer(1.0 / plan_hz, self.planner)
 
@@ -157,10 +144,6 @@ class LocalPlanner(Node):
         self.flag_static = int(msg.point.y)
         self.priority = int(msg.point.z)
 
-    # ------------------- 조건/유틸 -------------------
-    def _wrap_angle(self, a: float) -> float:
-        return (a + math.pi) % (2.0 * math.pi) - math.pi
-
     def wall_safe(self, idx,
                   safety_margin: float = 0.3,
                   min_width: float = 0.40,
@@ -175,7 +158,6 @@ class LocalPlanner(Node):
         dmin = -l + safety_margin
         dmax = r - safety_margin
 
-        # 너무 좁으면 최소 폭 보장
         if dmax - dmin < min_width:
             mid = 0.5 * (dmin + dmax)
             half = 0.5 * min_width
@@ -183,39 +165,16 @@ class LocalPlanner(Node):
 
         return dmin, dmax, r, l
 
-    def get_closest_index(self, x, y, path):
-        """가장 가까운 글로벌 경로 인덱스"""
-        if not path:
-            self.get_logger().warn("Cannot find closest index: Global path is empty!")
-            return 0
-        best_i = 0
-        dx = path[0][0] - x
-        dy = path[0][1] - y
-        best_d2 = dx * dx + dy * dy
-        for i in range(1, len(path)):
-            dx = path[i][0] - x
-            dy = path[i][1] - y
-            d2 = dx * dx + dy * dy
-            if d2 < best_d2:
-                best_i, best_d2 = i, d2
-        return best_i
-
-    # ------------------- A: 벡터화 safe_path(인덱스 전달) -------------------
     def safe_path(self, path, idx_list):
-        """
-        path: [[x,y,v], ...]
-        idx_list: 글로벌 경로 인덱스 (path 길이와 동일)
-        각 점의 d를 해당 인덱스의 코리도 [dmin,dmax]로 클립하고 마지막에 한 번만 글로벌로 역변환.
-        """
+        
         if not path:
             return []
-
         frenet_path = self.converter.global_to_frenet(path)  # Nx3 [s,d,v]
         if not frenet_path:
             return []
 
-        frenet_np = np.asarray(frenet_path, dtype=float)
-        d_vals = frenet_np[:, 1]
+        fr_np = np.asarray(frenet_path, dtype=float)  # (N,3)
+        d_vals = fr_np[:, 1]
 
         dmins = np.empty_like(d_vals)
         dmaxs = np.empty_like(d_vals)
@@ -224,40 +183,54 @@ class LocalPlanner(Node):
             dmins[k] = dmin
             dmaxs[k] = dmax
 
-        d_clipped = np.clip(d_vals, dmins, dmaxs)
-        frenet_np[:, 1] = d_clipped
+        fr_np[:, 1] = np.clip(d_vals, dmins, dmaxs)
 
-        safe_path = self.converter.frenet_to_global(frenet_np.tolist())  # [[x,y,v],...]
+        safe_path = self.converter.frenet_to_global(fr_np.tolist())
         return safe_path
 
-    # ------------------- 레퍼런스 경로 생성 -------------------
-    def generate_ref_spline_path(self):
-        if not self._gp_cache_ready or not self.global_path:
-            self.get_logger().warn("[RefPath] Cannot generate: global_path cache not ready.")
+    def get_closest_index(self, x, y, path):
+        if len(path) == 0:
+            self.get_logger().warn("Cannot find closest index: Global path is empty!")
+            return 0
+        idx = 0
+        
+        closest_dist = self.converter._calc_distance([x, y], path[0][:2])
+        for i in range(1, len(path)):
+            dist = self.converter._calc_distance([x, y], path[i][:2])
+            if dist < closest_dist:
+                idx = i
+                closest_dist = dist
+        return idx
+
+    def generate_global_path(self):
+        if not self.global_path:
+            self.get_logger().warn("[RefPath] Cannot generate: global_path is empty.")
             return []
 
-        gpath = self.global_path
-        path_size = len(gpath)
-        if path_size < 3:
-            self.get_logger().warn("[RefPath] global_path too short.")
+        path_size = len(self.global_path)
+        if path_size == 0:
+            self.get_logger().warn("[RefPath] Path size is zero after guard.")
             return []
 
         cur_idx = self.converter._get_closest_index(self.x, self.y)
         cur_idx = int(cur_idx % path_size)
-        span = min(30, path_size)  # 필요 시 파라미터화
 
-        idx_list = [(cur_idx + off) % path_size for off in range(span)]
-        seg = [gpath[i] for i in idx_list]
-        if not seg:
-            self.get_logger().warn("[RefPath] sliced segment is empty.")
-            self._active_idx_list = []
-            self._active_idx_set  = set()
-            return []
+        span = min(30, path_size)  # lookahead 길이
 
+        idx_list = [(cur_idx + offset) % path_size for offset in range(span)]
         self._active_idx_list = idx_list
         self._active_idx_set  = set(idx_list)
 
-        safe_global_path = self.safe_path(seg, idx_list)
+        self.get_logger().info(f"[RefPath] Generating frenet path: start={cur_idx}, span={span}")
+
+        global_path = [self.global_path[i] for i in idx_list]
+        if len(global_path) == 0:
+            self._active_idx_list = []
+            self._active_idx_set  = set()
+            self.get_logger().warn("PATH EMPTY in safe_path!")
+            return []
+
+        safe_global_path = self.safe_path(global_path, idx_list)
         if not safe_global_path:
             self.get_logger().warn("[RefPath] safe_path produced empty output.")
             return []
@@ -267,9 +240,7 @@ class LocalPlanner(Node):
         self.selected_path = np.asarray(safe_global_path, dtype=float)
         return safe_global_path
 
-
-    # ------------------- Avoidance (필요시 사용) -------------------
-    def _apply_local_d_bump(self, base_d_points, obs_s,
+    def apply_d_bump(self, base_d_points, obs_s,
                             bump, half_width_idx, side, smooth=True):
         d_points = np.copy(base_d_points)
         i_center = int(obs_s)
@@ -280,7 +251,7 @@ class LocalPlanner(Node):
 
         n = int(i1 - i0 + 1)
         if smooth and n > 1:
-            win = 0.5 * (1.0 + np.cos(np.linspace(-math.pi, math.pi, n)))
+            win = 0.5 * (1.0 + np.cos(np.linspace(-(math.pi), (math.pi), n)))
         else:
             win = np.ones(n)
 
@@ -289,24 +260,37 @@ class LocalPlanner(Node):
         return d_points
 
     def static_avoidance(self, selected_path, stat_s, stat_d, margin=0.3):
-        if not selected_path:
+        if selected_path is None or len(selected_path) == 0:
             return None
+
         frenet_path = self.selected_path_frenet
         if frenet_path is None or len(frenet_path) == 0:
+            self.get_logger().warn("[STATIC] Frenet snippet missing or length mismatch.")
             return None
 
-        obs_gidx = self.converter._get_closest_index(self.x_obs, self.y_obs)
+        if not getattr(self, "_active_idx_set", None):
+            return None
+
+        try:
+            if getattr(self, "x_obs", None) is not None and getattr(self, "y_obs", None) is not None:
+                obs_gidx = self.converter._get_closest_index(self.x_obs, self.y_obs)
+            else:
+                xo, yo = self.converter.frenet_to_global_point(float(stat_s), float(stat_d))
+                obs_gidx = self.converter._get_closest_index(xo, yo)
+        except Exception:
+            return None
 
         if obs_gidx not in self._active_idx_set:
-            return selected_path
-        
+            return None
+
+        dir_sign = self._heading_dir_sign()
+
         s_obs, d_obs = float(stat_s), float(stat_d)
         x_obs, y_obs = self.converter.frenet_to_global_point(s_obs, d_obs)
 
         obs_idx = self.get_closest_index(x_obs, y_obs, selected_path)
 
-        global_obs_idx = obs_gidx
-        d_min, d_max, right_distance, left_distance = self.wall_safe(global_obs_idx)
+        d_min, d_max, right_distance, left_distance = self.wall_safe(obs_gidx)
 
         left_target  = d_obs - 0.4
         right_target = d_obs + 0.4
@@ -325,9 +309,10 @@ class LocalPlanner(Node):
 
         s_points = np.asarray(frenet_path[:, 0], dtype=float)
         base_d   = np.asarray(frenet_path[:, 1], dtype=float)
+
         bump_mag = float(d_target - d_obs)
 
-        d_mod = self._apply_local_d_bump(
+        d_mod = self.apply_d_bump(
             base_d, obs_idx, bump=bump_mag,
             half_width_idx=5, side=side, smooth=True
         )
@@ -340,12 +325,10 @@ class LocalPlanner(Node):
 
         return static_path
 
-
-    # ------------------- Main Planner -------------------
     def planner(self):
         if self.odom is None or not self.converter.path_recived:
             return
-
+        
         if not self._gp_cache_ready:
             self.global_path = self.converter.get_global_path()
             if self.global_path:
@@ -353,35 +336,20 @@ class LocalPlanner(Node):
                 self.path_length = self.converter.get_path_length()
                 self._gp_cache_ready = True
             else:
-                return  
+                return
 
-        now = self.get_clock().now()
-        dt_ms = (now - self._last_plan_stamp).nanoseconds * 1e-6
-        flags = (self.flag_static, self.flag_dynamic, self.priority)
-        ego_s_val = self.ego_s if self.ego_s is not None else 0.0
-
-        moved = (self._last_ego_s is None) or (abs(ego_s_val - (self._last_ego_s or 0.0)) > 0.1)
-        flags_changed = (flags != self._last_flags)
-        time_ok = dt_ms >= 100.0  # 100ms 이상 경과 시
-
-        if not (moved or flags_changed or time_ok):
-            return
-
-        self._last_plan_stamp = now
-        self._last_ego_s = ego_s_val
-        self._last_flags = flags
-
-        default_path = self.generate_ref_spline_path()
+        default_path = self.generate_global_path()
         if not default_path:
+            self.get_logger().warn("[Planner] default_path is empty; skip this cycle.")
             return
 
-        # 회피 판단
         static_cond = bool(self.flag_static)
         dynamic_cond = bool(self.flag_dynamic)
 
-        # static 회피는 현재 선택된 프레넷 세그먼트를 활용
-        static_p = self.static_avoidance(self.selected_path.tolist() if isinstance(self.selected_path, np.ndarray) else self.selected_path,
-                                         self.static_s, self.static_d) if static_cond else None
+        static_p = self.static_avoidance(
+            self.selected_path.tolist() if isinstance(self.selected_path, np.ndarray) else self.selected_path,
+            self.static_s, self.static_d
+        ) if static_cond else None
 
         if static_cond:
             if static_p:
@@ -393,13 +361,11 @@ class LocalPlanner(Node):
         else:
             selected_path, path_type, self.mode = default_path, 0, 0
 
-        # B: Marker는 stride에 맞춰서만 송신
         self._viz_skip = (self._viz_skip + 1) % self._viz_stride
         if self._viz_skip == 0:
             selected_xy = [(p[0], p[1]) for p in (selected_path or [])]
             self.publish_path_colored(selected_xy, (0.0, 1.0, 0.0, 0.5), "active_path")
 
-        # nav_msgs/Path 퍼블리시 (BEST_EFFORT)
         if selected_path:
             msg = Path()
             msg.header.frame_id = self.frame_id
@@ -415,7 +381,6 @@ class LocalPlanner(Node):
                 msg.poses.append(ps)
             self.pub_path.publish(msg)
 
-    # ------------------- Visualization -------------------
     def publish_path_colored(self, path_points, color_rgba, ns):
         if not path_points:
             return
