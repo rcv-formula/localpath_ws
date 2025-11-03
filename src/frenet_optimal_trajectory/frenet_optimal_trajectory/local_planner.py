@@ -68,11 +68,14 @@ class LocalPlanner(Node):
         self.flag_static = 0
         self.priority = 0
         self.mode = 0  # 0=normal, 1=static, 2=dynamic, 3=return, 4=acc
-        self.selected_path = None
         self.forward_length = 5.0
 
-        self.selected_path = self.converter.get_global_path()
-        self.selected_path_frenet = None
+        self.global_path = self.converter.get_global_path()
+        self.global_frenet_path = self.converter.global_to_frenet(self.global_path)
+        self.path_length = self.converter.get_path_length()
+
+        self.selected_path = self.global_path
+        self.selected_path_frenet = self.global_frenet_path
 
         self.DEBUG_PATH_LOG = True
         self._JUMP_THRESH   = 2.0 
@@ -108,26 +111,6 @@ class LocalPlanner(Node):
         py = self.odom.pose.pose.position.y
         tx, ty = self._nearest_idx_and_tangent(gp, px, py)
         return +1.0 if (ex*tx + ey*ty) >= 0.0 else -1.0
-    
-    def _sample_s(self, s_start: float, s_end: float, n: int):
-        return np.array(np.linspace(s_start, s_end, n))
-
-    def _path_stats(self, pts):
-        n = len(pts)
-        if n < 2:
-            return {"n": n, "total_len": 0.0, "max_gap": 0.0, "max_gap_idx": -1}
-        total = 0.0
-        max_gap = 0.0
-        max_idx = 0
-        for i in range(n-1):
-            dx = pts[i+1][0] - pts[i][0]
-            dy = pts[i+1][1] - pts[i][1]
-            d  = math.hypot(dx, dy)
-            total += d
-            if d > max_gap:
-                max_gap = d
-                max_idx = i
-        return {"n": n, "total_len": total, "max_gap": max_gap, "max_gap_idx": max_idx}
     
     def _log_selected_path(self, kind_str, pts, extra=None):
         s = self._path_stats(pts)
@@ -196,16 +179,14 @@ class LocalPlanner(Node):
     def _wrap_angle(self, a: float) -> float:
         return (a + math.pi) % (2.0*math.pi) - math.pi
 
-    def _corridor_at_s(self, s: float, prefer_d: float,
-                       safety_margin: float = 0.40,
-                       min_width: float = 0.30,
+    def wall_safe(self, idx,
+                       safety_margin: float = 0.3,
+                       min_width: float = 0.40,
                        dir_sign: float = +1.0):
 
-        x, y = self.converter.frenet_to_global_point(s, prefer_d)
-        idx = self.converter._get_closest_index(x, y)
         r, l = self.converter.get_wall_distance(idx)  # (right, left)
         r, l = float(r), float(l)
-        if dir_sign < 0:  # 역방향이면 오른/왼 뒤집기
+        if dir_sign < 0: 
             r, l = l, r
         r = max(0.0, r); l = max(0.0, l)
 
@@ -220,13 +201,42 @@ class LocalPlanner(Node):
 
         return dmin, dmax, r, l
 
+    def safe_path(self, path, idx):
+        frenet_path = self.converter.global_to_frenet(path)
+        
+        safe_frenet_path = []
+
+        for point in frenet_path:
+            s, d = point[0], point[1]
+            x, y = self.converter.frenet_to_global_point(s, d)
+            idx = self.converter._get_closest_index(x, y)
+            
+            dmin, dmax, _, _ = self.wall_safe(idx)
+            safe_d = float(np.clip(d, dmin, dmax))
+
+            safe_frenet_path.append([s, safe_d, point[2]])
+
+        safe_path = self.converter.frenet_to_global(safe_frenet_path)
+
+        return safe_path
+    
+    def get_closest_index(self, x, y, path):
+        """가장 가까운 글로벌 경로 인덱스를 찾는 함수"""
+        if len(path) == 0:
+            self.node.get_logger().warn("Cannot find closest index: Global path is empty!")
+            return 0
+
+        idx = 0
+        closest_dist = self._calc_distance([x, y], path[0][:2])
+        for i in range(1, len(path)):
+            dist = self._calc_distance([x, y], path[i][:2])
+            if dist < closest_dist:
+                idx = i
+                closest_dist = dist
+        return idx
+
     # ------------------- Reference 보정 spline -------------------
     def generate_ref_spline_path(self):
-        """
-        전역 기준 d=0(글로벌 패스)을 '항상' 목표로 삼고,
-        포인트별 코리도 클램프에서만 안전을 보장한다.
-        -> 바깥(양수 d)로 드리프트하는 현상 제거
-        """
         # if self.ego_s is None or self.ego_d is None:
         #     return []
 
@@ -282,49 +292,20 @@ class LocalPlanner(Node):
         #     return xy_path
 
         idx = self.converter._get_closest_index(self.x, self.y)
+        end_idx = (idx + 30) % self.path_length
 
-        global_path = self.converter.get_global_path()
-        global_frenet_path = self.converter.global_to_frenet(global_path)
+        global_path = self.global_path[idx:end_idx]
 
-        if idx + 30 > len(global_frenet_path):
-            global_path = global_path[idx:] + global_path[:(idx+30)%len(global_frenet_path)]  
-            global_frenet_path = global_frenet_path[idx:] + global_frenet_path[:(idx+30)%len(global_frenet_path)]
-            s_arr = global_frenet_path[:, 0]
-            d_vals = global_frenet_path[:, 1]
-        else:
-            global_path = global_path[idx:] + global_path[:(idx+30)%len(global_frenet_path)]  
-            global_frenet_path = global_frenet_path[idx:idx+30]
-            s_arr = global_frenet_path[:, 0]
-            d_vals = global_frenet_path[:, 1]
+        safe_global_path = self.safe_path(global_path)
+        safe_global_frenet_path = self.converter.global_to_frenet(safe_global_path)
 
-        frenet_path = []
-        for s_i, d_i in zip(s_arr, d_vals):
-            v_ref = self.converter.get_velocity_at_s(s_i)
-            frenet_path.append([float(s_i), float(d_i), float(v_ref)])
-
-        if len(frenet_path) > 0:
-            self.selected_path_frenet = np.asarray(frenet_path, dtype=float)
-            xy_path = global_path  # [x, y, v]
-            self.selected_path = np.asarray(xy_path, dtype=float)
-            return xy_path
+        if len(safe_global_path) > 0:
+            self.selected_path_frenet = np.asarray(safe_global_frenet_path, dtype=float)
+            self.selected_path = np.asarray(safe_global_path, dtype=float)
+            return safe_global_path
 
         self.get_logger().warn("[RefPath] frenet_path generation resulted in 0 points.")
         return []
-
-    
-    def get_closest_index(self, x, y, path):
-        if len(path) == 0:
-            self.node.get_logger().warn("Cannot find closest index: path is empty!")
-            return 0
-
-        idx = 0
-        closest_dist = self.converter._calc_distance([x, y], path[0][:2])
-        for i in range(1, len(path)):
-            dist = self.converter._calc_distance([x, y], path[i][:2])
-            if dist < closest_dist:
-                idx = i
-                closest_dist = dist
-        return idx
 
     # ------------------- Avoidance functions -------------------
     def _apply_local_d_bump(self, base_d_points, obs_s,
@@ -352,76 +333,47 @@ class LocalPlanner(Node):
         return d_points
 
     def static_avoidance(self, selected_path, stat_s, stat_d, margin=0.3):
-        # 선택 경로(XY) 존재 확인
         if selected_path is None or len(selected_path) == 0:
             return None
-        # Frenet 스니펫이 생성되어 있어야 함
-        fr = getattr(self, "selected_path_frenet", None)
-        if fr is None or len(fr) != len(selected_path):
+        
+        frenet_path = self.selected_path_frenet
+        if frenet_path is None:
             self.get_logger().warn("[STATIC] Frenet snippet missing or length mismatch.")
             return None
 
-        # === 1) 인덱스/여유거리 계산은 XY 기준 ===
         dir_sign = self._heading_dir_sign()
-        if self.static_xy is None or self.ego_s is None or self.ego_d is None:
-            return None
 
         s_obs, d_obs = float(stat_s), float(stat_d)
+        x_obs, y_obs = self.converter.frenet_to_global_point(s_obs, d_obs)
+        obs_idx = self.get_closest_index(x_obs, y_obs, selected_path)
 
-        path_len = float(self.converter.get_path_length())
-        if path_len <= 0.0:
-            self.get_logger().warn("[STATIC] Cannot compute avoidance: invalid path length.")
-            return None
-
-        # 장애물과 가장 가까운 "스니펫(XY)" 인덱스
-        obs_idx = self.get_closest_index(self.x_obs, self.y_obs, selected_path)
-        # 벽 여유는 "글로벌 경로" 인덱스에서 조회
-        gidx = self.converter._get_closest_index(self.x_obs, self.y_obs)
-        right_void, left_void = self.converter.get_wall_distance(gidx)
-        if dir_sign == -1.0:
-            right_void, left_void = left_void, right_void
-
-        right_clearance = float(right_void - d_obs)
-        left_clearance  = float(left_void  + d_obs)
+        global_obs_idx = self.converter._get_closest_index(self.x_obs, self.y_obs)
+        d_min, d_max, right_distance, left_distance = self.wall_safe(global_obs_idx)
 
         self.get_logger().info(
-            f"[STATIC] Clearance -> right: {right_clearance:.2f}, left: {left_clearance:.2f} "
-            f"(void r={right_void:.2f}, l={left_void:.2f}, d_obs={d_obs:.2f})"
+            f"(distance r={right_distance:.2f}, l={left_distance:.2f}, d_obs={d_obs:.2f})"
         )
-        self.get_logger().info(f"[STATIC] Using safety margin: {margin:.2f}m")
 
-        clearance_need = margin
-        can_go_right = right_clearance > clearance_need
-        can_go_left  = left_clearance  > clearance_need
-
-        # 타겟 d 설정 (현 d 기준 ±0.4m)
-        # → d_obs(장애물의 d) 기준으로 살짝 이동
         left_target  = d_obs - 0.4
         right_target = d_obs + 0.4
 
-        if can_go_right and (right_clearance > left_clearance):
+        can_go_right = right_target < d_max
+        can_go_left  = left_target  > d_min
+
+        if can_go_right and (right_distance > left_distance):
             side = -1.0
             d_target = right_target
         elif can_go_left:
             side = +1.0
             d_target = left_target
         else:
-            self.get_logger().info("[STATIC] No lateral clearance. Keep original path.")
+            self.get_logger().info("[STATIC] Can't move. Keep original path.")
             return None
 
-        # === 2) bump 적용은 Frenet 스니펫에 수행 ===
-        s_points = np.asarray(fr[:, 0], dtype=float)  # s
-        base_d   = np.asarray(fr[:, 1], dtype=float)  # d
+        s_points = np.asarray(frenet_path[:, 0], dtype=float)
+        base_d   = np.asarray(frenet_path[:, 1], dtype=float)
 
-        # 현재 obs_idx 위치에서 목표 d까지 이동량
-        d_here   = float(base_d[obs_idx])
-        bump_mag = float(d_target - d_here)
-
-        # 과도한 lateral step 클램프 (환경에 맞춰 조정)
-        # max_bump = 0.8  # or self.MAX_ROAD_WIDTH - margin
-        # if abs(bump_mag) > max_bump:
-        #     self.get_logger().warn(f"[STATIC] bump_mag {bump_mag:.2f} → clip to ±{max_bump}")
-        #     bump_mag = max(-max_bump, min(max_bump, bump_mag))
+        bump_mag = float(d_target - d_obs)
 
         self.get_logger().info(f"[STATIC] Applying bump: side={side}, mag={bump_mag:.2f}")
         d_mod = self._apply_local_d_bump(
@@ -429,14 +381,13 @@ class LocalPlanner(Node):
             half_width_idx=5, side=side, smooth=True
         )
 
-        # === 3) 수정된 Frenet → XY로 변환해서 반환 ===
-        path_xyv = []
+        static_path = []
         for s, d in zip(s_points, d_mod):
             x, y = self.converter.frenet_to_global_point(s, d)
             v_ref = self.converter.get_velocity_at_s(s)
-            path_xyv.append([x, y, v_ref])
+            static_path.append([x, y, v_ref])
 
-        return path_xyv
+        return static_path
 
 
     # ------------------- Main Planner -------------------
@@ -452,14 +403,12 @@ class LocalPlanner(Node):
         if self.dynamic_xy is not None:
             dyn_s, _ = self.converter.global_to_frenet_point(*self.dynamic_xy)
 
-        global_path = self.converter.get_global_path()
-        default_path = global_path
-        # default_path =self.generate_ref_spline_path()
+        default_path =self.generate_ref_spline_path()
         
         static_cond = bool(self.flag_static)
         dynamic_cond = bool(self.flag_dynamic)
-        
-        static_p  = self.static_avoidance(global_path, stat_s, stat_d) if static_cond else None
+
+        static_p  = self.static_avoidance(default_path, stat_s, stat_d) if static_cond else None
 
         if static_cond:
             if static_p:
