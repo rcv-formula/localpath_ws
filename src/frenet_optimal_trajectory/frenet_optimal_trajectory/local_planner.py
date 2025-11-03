@@ -286,11 +286,28 @@ class LocalPlanner(Node):
         #     self.selected_path = np.asarray(xy_path, dtype=float)
         #     return xy_path
 
+        if not self.global_path:
+            self.get_logger().warn("[RefPath] Cannot generate: global_path is empty.")
+            return []
+
+        path_size = len(self.global_path)
+        if path_size == 0:
+            self.get_logger().warn("[RefPath] Path size is zero after guard.")
+            return []
+
         idx = self.converter._get_closest_index(self.x, self.y)
-        end_idx = (idx + 30) % len(self.global_path)
+        idx = int(idx % path_size)
+
+        span = min(30, path_size)
+        end_idx = (idx + span) % path_size
         self.get_logger().info(f"[RefPath] Generating frenet path from idx={idx} to end_idx={end_idx}")
 
-        global_path = self.global_path[idx:end_idx]
+        global_path = [
+            self.global_path[(idx + offset) % path_size] for offset in range(span)
+        ]
+
+        if len(global_path) == 0:
+            self.get_logger().warn("PATH EMPTY in safe_path!")
 
         safe_global_path = self.safe_path(global_path)
         safe_global_frenet_path = self.converter.global_to_frenet(safe_global_path)
@@ -403,7 +420,7 @@ class LocalPlanner(Node):
         if self.dynamic_xy is not None:
             dyn_s, _ = self.converter.global_to_frenet_point(*self.dynamic_xy)
 
-        default_path =self.generate_ref_spline_path()
+        default_path = self.generate_ref_spline_path()
         if not default_path:
             self.get_logger().warn("[Planner] default_path is empty; skip this cycle.")
             return
@@ -411,7 +428,7 @@ class LocalPlanner(Node):
         static_cond = bool(self.flag_static)
         dynamic_cond = bool(self.flag_dynamic)
 
-        static_p  = self.static_avoidance(default_path, stat_s, stat_d) if static_cond else None
+        static_p  = self.static_avoidance(self.selected_path, stat_s, stat_d) if static_cond else None
 
         if static_cond:
             if static_p:
