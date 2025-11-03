@@ -296,7 +296,13 @@ class LocalPlanner(Node):
         right_target = d_obs + 0.4
 
         can_go_right = right_target < d_max
-        can_go_left  = left_target  > d_min
+        can_go_left  = abs(left_target)  > abs(d_min)
+
+        if abs(left_target) < abs(d_min):
+            left_target = d_min
+
+        if right_target > d_max:
+            right_target = d_max
 
         if can_go_right and (right_distance > left_distance):
             side = -1.0
