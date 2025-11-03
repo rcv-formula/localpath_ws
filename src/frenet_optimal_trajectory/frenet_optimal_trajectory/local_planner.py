@@ -218,13 +218,13 @@ class LocalPlanner(Node):
     def get_closest_index(self, x, y, path):
         """가장 가까운 글로벌 경로 인덱스를 찾는 함수"""
         if len(path) == 0:
-            self.node.get_logger().warn("Cannot find closest index: Global path is empty!")
+            self.get_logger().warn("Cannot find closest index: Global path is empty!")
             return 0
 
         idx = 0
-        closest_dist = self._calc_distance([x, y], path[0][:2])
+        closest_dist = self.converter._calc_distance([x, y], path[0][:2])
         for i in range(1, len(path)):
-            dist = self._calc_distance([x, y], path[i][:2])
+            dist = self.converter._calc_distance([x, y], path[i][:2])
             if dist < closest_dist:
                 idx = i
                 closest_dist = dist
@@ -404,7 +404,10 @@ class LocalPlanner(Node):
             dyn_s, _ = self.converter.global_to_frenet_point(*self.dynamic_xy)
 
         default_path =self.generate_ref_spline_path()
-        
+        if not default_path:
+            self.get_logger().warn("[Planner] default_path is empty; skip this cycle.")
+        return
+    
         static_cond = bool(self.flag_static)
         dynamic_cond = bool(self.flag_dynamic)
 
