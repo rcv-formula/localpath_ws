@@ -23,7 +23,7 @@ class LocalPlanner(Node):
 
         # ===== Parameters =====
         self.frame_id = str(self.declare_parameter("frame_id", "map").value)
-        plan_hz = float(self.declare_parameter("plan_hz", 20.0).value)
+        plan_hz = float(self.declare_parameter("plan_hz", 40.0).value)
         self.MAX_SPEED = float(self.declare_parameter("MAX_SPEED", 4.5).value)
         self.MAX_ROAD_WIDTH = float(self.declare_parameter("MAX_ROAD_WIDTH", 2.0).value)
         self.ROBOT_RADIUS = float(self.declare_parameter("ROBOT_RADIUS", 0.3).value)
@@ -145,7 +145,7 @@ class LocalPlanner(Node):
         self.priority = int(msg.point.z)
 
     def wall_safe(self, idx,
-                  safety_margin: float = 0.2,
+                  safety_margin: float = 0.3,
                   dir_sign: float = +1.0):
         r, l = self.converter.get_wall_distance(idx)  # (right, left)
         r, l = float(r), float(l)
@@ -213,7 +213,7 @@ class LocalPlanner(Node):
         cur_idx = self.converter._get_closest_index(self.x, self.y)
         cur_idx = int(cur_idx % path_size)
 
-        span = min(30, path_size)  # lookahead 길이
+        span = min(50, path_size)  # lookahead 길이
 
         idx_list = [(cur_idx + offset) % path_size for offset in range(span)]
         self._active_idx_list = idx_list
@@ -228,13 +228,13 @@ class LocalPlanner(Node):
             self.get_logger().warn("PATH EMPTY in safe_path!")
             return []
 
-        safe_global_path = self.safe_path(global_path, idx_list)
+        safe_global_path = global_path
         if not safe_global_path:
             self.get_logger().warn("[RefPath] safe_path produced empty output.")
             return []
 
-        safe_global_frenet_path = self.converter.global_to_frenet(safe_global_path)
-        self.selected_path_frenet = np.asarray(safe_global_frenet_path, dtype=float)
+        global_frenet_path = self.converter.global_to_frenet(global_path)
+        self.selected_path_frenet = np.asarray(global_frenet_path, dtype=float)
         self.selected_path = np.asarray(safe_global_path, dtype=float)
         return safe_global_path
 
@@ -257,7 +257,7 @@ class LocalPlanner(Node):
         d_points[i0: i1 + 1] += signed * win
         return d_points
 
-    def static_avoidance(self, selected_path, stat_s, stat_d, margin=0.3):
+    def static_avoidance(self, selected_path, stat_s, stat_d, margin=0.4):
         if selected_path is None or len(selected_path) == 0:
             return None
 
@@ -292,6 +292,9 @@ class LocalPlanner(Node):
         left_target  = d_obs - margin
         right_target = d_obs + margin
 
+
+        self.get_logger().info(f"오른쪽 회피: {right_distance}")
+
         if left_target < d_min:
             left_target = d_min
 
@@ -301,9 +304,11 @@ class LocalPlanner(Node):
         if right_distance > left_distance:
             side = -1.0
             d_target = right_target
-        elif left_distance > right_distance:
+        elif left_distance >= right_distance:
             side = +1.0
             d_target = left_target
+            self.get_logger().info(f"왼쪽 회피: {left_distance}")
+
         else:
             self.get_logger().warn("No safe side to avoid static obstacle.")
             return None
