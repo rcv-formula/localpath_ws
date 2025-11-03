@@ -373,7 +373,6 @@ class coordinate_converter:
         out2 = self._calc_proj(closest_idx - 1, closest_idx, x, y)
 
         s, d = 0, 0
-        self.node.get_logger().info(f"index: {closest_idx}, s: {out1[0]}, d: {out1[1]}")
 
         if abs(out1[1]) > abs(out2[1]):
             s = out2[0] + self._calc_path_distance(0, closest_idx - 1)
@@ -482,13 +481,19 @@ class coordinate_converter:
         vectorA = pointB - pointA
         vectorB = pointC - pointA
 
-        proj_t = np.dot(vectorB, vectorA) / np.dot(vectorA, vectorA)
-        proj_point = pointA + (proj_t * vectorA)
+        denom = np.dot(vectorA, vectorA)
+        if denom < 1e-12:
+            # Degenerate segment; treat projection as the start point.
+            proj_t = 0.0
+            proj_point = pointA
+        else:
+            proj_t = np.dot(vectorB, vectorA) / denom
+            proj_point = pointA + (proj_t * vectorA)
 
         d = np.linalg.norm(proj_point - pointC)
         if np.cross(vectorA, vectorB) > 0:
             d = -d
-        s = proj_t * np.dot(vectorA, vectorA)
+        s = proj_t * denom
         return [s, d]
 
     def _calc_path_distance(self, start_idx, end_idx):

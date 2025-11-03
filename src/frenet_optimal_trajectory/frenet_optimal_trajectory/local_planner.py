@@ -70,12 +70,12 @@ class LocalPlanner(Node):
         self.mode = 0  # 0=normal, 1=static, 2=dynamic, 3=return, 4=acc
         self.forward_length = 5.0
 
-        self.global_path = self.converter.get_global_path()
-        self.global_frenet_path = self.converter.global_to_frenet(self.global_path)
-        self.path_length = self.converter.get_path_length()
+        self.global_path = None
+        self.global_frenet_path = None
+        self.path_length = 0.0
 
-        self.selected_path = self.global_path
-        self.selected_path_frenet = self.global_frenet_path
+        self.selected_path = None
+        self.selected_path_frenet = None
 
         self.DEBUG_PATH_LOG = True
         self._JUMP_THRESH   = 2.0 
@@ -112,12 +112,7 @@ class LocalPlanner(Node):
         tx, ty = self._nearest_idx_and_tangent(gp, px, py)
         return +1.0 if (ex*tx + ey*ty) >= 0.0 else -1.0
     
-    def _log_selected_path(self, kind_str, pts, extra=None):
-        s = self._path_stats(pts)
-        head = pts[0] if pts else (None, None)
-        tail = pts[-1] if pts else (None, None)
-        msg = (f"[PATH] kind={kind_str} n={s['n']} ")
-        # self.get_logger().info(msg)
+
 
     # ------------------- Callbacks -------------------
     def cb_odom(self, msg):
@@ -201,7 +196,7 @@ class LocalPlanner(Node):
 
         return dmin, dmax, r, l
 
-    def safe_path(self, path, idx):
+    def safe_path(self, path):
         frenet_path = self.converter.global_to_frenet(path)
         
         safe_frenet_path = []
@@ -292,7 +287,8 @@ class LocalPlanner(Node):
         #     return xy_path
 
         idx = self.converter._get_closest_index(self.x, self.y)
-        end_idx = (idx + 30) % self.path_length
+        end_idx = (idx + 30) % len(self.global_path)
+        self.get_logger().info(f"[RefPath] Generating frenet path from idx={idx} to end_idx={end_idx}")
 
         global_path = self.global_path[idx:end_idx]
 
@@ -465,7 +461,6 @@ class LocalPlanner(Node):
                     extra["dyn_s"]  = f"{float(self.converter.global_to_frenet_point(*self.dynamic_xy)[0]):.2f}"
             except Exception:
                 pass
-            self._log_selected_path(kind_str, selected_path, extra=extra)
 
     # ------------------- Visualization -------------------
     def publish_path_colored(self, path_points, color_rgba, ns):
