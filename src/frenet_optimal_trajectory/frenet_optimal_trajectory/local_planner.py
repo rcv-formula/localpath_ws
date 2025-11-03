@@ -95,6 +95,11 @@ class LocalPlanner(Node):
         self._last_ego_s = None
         self._last_flags = (0, 0, 0)
 
+        # __init__ 끝부분 근처
+        self._active_idx_list = []
+        self._active_idx_set  = set()
+
+
         self.create_timer(1.0 / plan_hz, self.planner)
 
     # ------------------- Helpers -------------------
@@ -227,7 +232,6 @@ class LocalPlanner(Node):
 
     # ------------------- 레퍼런스 경로 생성 -------------------
     def generate_ref_spline_path(self):
-        # C: 글로벌 경로 캐시가 준비되어 있어야 함
         if not self._gp_cache_ready or not self.global_path:
             self.get_logger().warn("[RefPath] Cannot generate: global_path cache not ready.")
             return []
@@ -238,7 +242,6 @@ class LocalPlanner(Node):
             self.get_logger().warn("[RefPath] global_path too short.")
             return []
 
-        # 현재 위치 인덱스에서 연속 구간 추출(래핑 포함)
         cur_idx = self.converter._get_closest_index(self.x, self.y)
         cur_idx = int(cur_idx % path_size)
         span = min(30, path_size)  # 필요 시 파라미터화
@@ -247,9 +250,13 @@ class LocalPlanner(Node):
         seg = [gpath[i] for i in idx_list]
         if not seg:
             self.get_logger().warn("[RefPath] sliced segment is empty.")
+            self._active_idx_list = []
+            self._active_idx_set  = set()
             return []
 
-        # A: 인덱스 전달하여 코리도 클립
+        self._active_idx_list = idx_list
+        self._active_idx_set  = set(idx_list)
+
         safe_global_path = self.safe_path(seg, idx_list)
         if not safe_global_path:
             self.get_logger().warn("[RefPath] safe_path produced empty output.")
@@ -259,6 +266,7 @@ class LocalPlanner(Node):
         self.selected_path_frenet = np.asarray(safe_global_frenet_path, dtype=float)
         self.selected_path = np.asarray(safe_global_path, dtype=float)
         return safe_global_path
+
 
     # ------------------- Avoidance (필요시 사용) -------------------
     def _apply_local_d_bump(self, base_d_points, obs_s,
@@ -281,28 +289,30 @@ class LocalPlanner(Node):
         return d_points
 
     def static_avoidance(self, selected_path, stat_s, stat_d, margin=0.3):
-        if selected_path is None or len(selected_path) == 0:
+        if not selected_path:
             return None
         frenet_path = self.selected_path_frenet
         if frenet_path is None or len(frenet_path) == 0:
-            self.get_logger().warn("[STATIC] Frenet snippet missing or length mismatch.")
             return None
 
+        obs_gidx = self.converter._get_closest_index(self.x_obs, self.y_obs)
+
+        if obs_gidx not in self._active_idx_set:
+            return selected_path
+        
         s_obs, d_obs = float(stat_s), float(stat_d)
         x_obs, y_obs = self.converter.frenet_to_global_point(s_obs, d_obs)
+
         obs_idx = self.get_closest_index(x_obs, y_obs, selected_path)
 
-        # 벽 거리 기반 좌/우 여유
-        if getattr(self, "x_obs", None) is None or getattr(self, "y_obs", None) is None:
-            return None
-        global_obs_idx = self.converter._get_closest_index(self.x_obs, self.y_obs)
+        global_obs_idx = obs_gidx
         d_min, d_max, right_distance, left_distance = self.wall_safe(global_obs_idx)
 
-        left_target = d_obs - 0.4
+        left_target  = d_obs - 0.4
         right_target = d_obs + 0.4
 
         can_go_right = right_target < d_max
-        can_go_left = left_target > d_min
+        can_go_left  = left_target  > d_min
 
         if can_go_right and (right_distance > left_distance):
             side = -1.0
@@ -314,7 +324,7 @@ class LocalPlanner(Node):
             return None
 
         s_points = np.asarray(frenet_path[:, 0], dtype=float)
-        base_d = np.asarray(frenet_path[:, 1], dtype=float)
+        base_d   = np.asarray(frenet_path[:, 1], dtype=float)
         bump_mag = float(d_target - d_obs)
 
         d_mod = self._apply_local_d_bump(
@@ -330,13 +340,12 @@ class LocalPlanner(Node):
 
         return static_path
 
+
     # ------------------- Main Planner -------------------
     def planner(self):
-        # 경로 미수신/오돔 없음
         if self.odom is None or not self.converter.path_recived:
             return
 
-        # C: 글로벌 경로 캐시 (최초 1회)
         if not self._gp_cache_ready:
             self.global_path = self.converter.get_global_path()
             if self.global_path:
@@ -344,15 +353,14 @@ class LocalPlanner(Node):
                 self.path_length = self.converter.get_path_length()
                 self._gp_cache_ready = True
             else:
-                return  # 아직 글로벌 경로 없음
+                return  
 
-        # D: 재계획 트리거 (움직임/플래그변화/시간경과 중 하나일 때만)
         now = self.get_clock().now()
         dt_ms = (now - self._last_plan_stamp).nanoseconds * 1e-6
         flags = (self.flag_static, self.flag_dynamic, self.priority)
         ego_s_val = self.ego_s if self.ego_s is not None else 0.0
 
-        moved = (self._last_ego_s is None) or (abs(ego_s_val - (self._last_ego_s or 0.0)) > 0.2)
+        moved = (self._last_ego_s is None) or (abs(ego_s_val - (self._last_ego_s or 0.0)) > 0.1)
         flags_changed = (flags != self._last_flags)
         time_ok = dt_ms >= 100.0  # 100ms 이상 경과 시
 
@@ -363,7 +371,6 @@ class LocalPlanner(Node):
         self._last_ego_s = ego_s_val
         self._last_flags = flags
 
-        # 기본 경로 생성
         default_path = self.generate_ref_spline_path()
         if not default_path:
             return
