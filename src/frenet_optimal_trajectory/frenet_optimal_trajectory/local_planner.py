@@ -394,6 +394,10 @@ class LocalPlanner(Node):
     def planner(self):
         if self.odom is None or not self.converter.path_recived:
             return
+        
+        self.global_path = self.converter.get_global_path()
+        self.global_frenet_path = self.converter.global_to_frenet(self.global_path)
+        self.path_length = self.converter.get_path_length()
 
         lin = self.odom.twist.twist.linear
         ego_v = math.hypot(lin.x, lin.y)
